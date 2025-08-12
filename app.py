@@ -57,9 +57,10 @@ CALENDLY_URL = os.getenv("CALENDLY_URL")
 
 # --- 2. Herramientas del Agente (Tools) ---
 @tool
-def search_chroma(query: str, k: int = 4) -> List[Dict[str, Any]]:
+def search_chroma(query: str, k: int = 4, filters: dict = None) -> List[Dict[str, Any]]:
     """
-    Busca información relevante en el CV y otros documentos del portafolio.
+    Busca información relevante en el CV y otros documentos del portafolio,
+    opcionalmente filtrando por metadatos como el 'source'.
     Úsalo para responder preguntas sobre experiencia, proyectos, habilidades, y formación.
     """
     try:
@@ -67,7 +68,13 @@ def search_chroma(query: str, k: int = 4) -> List[Dict[str, Any]]:
         vectordb = Chroma(persist_directory=CHROMA_PERSIST_DIR, embedding_function=embeddings, collection_name=CHROMA_COLLECTION_NAME)
         if vectordb._collection.count() == 0:
             return [{"error": "La base de datos Chroma está vacía."}]
-        docs = vectordb.similarity_search(query, k=k)
+
+        # Realiza la búsqueda, aplicando el filtro si está presente
+        if filters:
+            docs = vectordb.similarity_search(query, k=k, filter=filters)
+        else:
+            docs = vectordb.similarity_search(query, k=k)
+
         return [{"source": d.metadata.get("source", "N/A"), "text": d.page_content} for d in docs]
     except Exception as e:
         return [{"error": f"Error buscando en Chroma: {str(e)}"}]
@@ -195,21 +202,49 @@ def agent_node(state: GraphState):
     user_type = state.get("user_type", "otro")
     last_user_type = state.get("last_user_type", None)
 
-    # Se obtienen todos los mensajes de la conversación, excepto el primer SystemMessage si existe
-    messages = state["messages"]
-
     # Generamos el mensaje de bienvenida y el prompt del sistema
     initial_message = ""
     if user_type != last_user_type:
         initial_message = f"¡Perfecto! {TOOL_DESCRIPTIONS.get(user_type, '')}\n"
 
+    # --- Se agrega la lógica de filtros aquí ---
+    filter_logic = ""
+    if user_type == "reclutador":
+        filter_logic = (
+            "Utiliza la herramienta de búsqueda (`search_chroma`)"
+            "con los filtros `{'source': 'data_sources/cv.pdf'}` o `{'source': 'Yoseph10/AgentAI_JobSearch'}` "
+            "para buscar información relevante sobre mi CV o proyectos. Si la información es sobre el proyecto del portafolio `AgentAI_JobSearch`, usa el segundo filtro. Si es sobre mi experiencia laboral o habilidades, usa el primer filtro."
+        )
+    elif user_type in ["cliente", "alumno"]:
+        filter_logic = (
+            "Utiliza la herramienta de búsqueda (`search_chroma`)"
+            "con el filtro `{'source': './data_sources/Portafolio Extendido.pdf'}`"
+        )
+    else:
+        # No se aplica ningún filtro para 'otro' o 'pregunta'
+        filter_logic = (
+            "Para este tipo de usuario, utiliza la herramienta `search_chroma` sin ningún filtro para buscar en todos los documentos disponibles."
+        )
+
     system_prompts = {
-        "reclutador": "Eres un asistente profesional que representa al dueño de este portafolio. Tu objetivo es destacar su experiencia y habilidades para conseguir un empleo. Utiliza la herramienta de búsqueda (`search_chroma`) para responder preguntas sobre su experiencia, proyectos, habilidades, y formación. Solo usa la herramienta de enviar CV (`send_cv`) si el usuario lo pide explícitamente.",
-        "cliente": "Eres un asistente comercial y consultor. Tu objetivo es entender las necesidades del cliente, explicar cómo los servicios o productos pueden ayudarle, y facilitar el contacto o agendar una reunión. Sé proactivo y servicial. Utiliza la herramienta de búsqueda (`search_chroma`) para responder preguntas y la herramienta de agendar llamada (`schedule_call`) cuando el usuario lo solicite, asegurándote de tener todos los datos necesarios.",
-        "alumno": "Eres un asistente académico, amigable y servicial. Tu objetivo es resolver dudas sobre cursos o material de formación, y animar al alumno a continuar su aprendizaje. Utiliza la herramienta de búsqueda (`search_chroma`) para encontrar información relevante en el portafolio.",
-        "otro": "Eres un asistente conversacional general. Responde de forma amable y profesional. Usa la herramienta de búsqueda (`search_chroma`) para responder preguntas sobre el portafolio. Si la pregunta no es sobre el portafolio, responde de forma conversacional. La herramienta de agendar llamada (`schedule_call`) solo debe usarse si el usuario lo pide.",
-        "pregunta": "Eres un asistente conversacional. Tu objetivo es responder la pregunta del usuario. Si la pregunta es sobre el CV, usa la herramienta de búsqueda (`search_chroma`). Si no, responde directamente. Sé amable y profesional.",
+        "reclutador": f"""Eres un asistente profesional que representa al dueño de este portafolio. Es decir, eres Yoseph Ayala el consultor en IA y Data Science.
+            Tu objetivo es destacar su experiencia y habilidades para conseguir un empleo. {filter_logic}.
+            Solo usa la herramienta de enviar CV (`send_cv`) si el usuario lo pide explícitamente.
+            Si no cuentas con  la información, responde directamente que no cuentas con la información. Sé amable y profesional.""",
+        "cliente": f"""Eres un asistente comercial y consultor que actua como si fuese Yoseph Ayala. Tu objetivo es entender las necesidades del cliente,
+            explicar cómo los servicios o productos pueden ayudarle, y facilitar el contacto o agendar una reunión. Sé proactivo y servicial.
+            {filter_logic} para vender los servicios del portafolio. Utiliza la herramienta de agendar llamada (`schedule_call`) cuando el usuario lo solicite.
+            Si no cuentas con  la información, responde directamente que no cuentas con la información. Sé amable y profesional.""",
+        "alumno": f"""Eres Yoseph Ayala, un profesor. Tu objetivo es resolver dudas sobre cursos o formación que ofreces. {filter_logic}.
+            Si no cuentas con  la información, responde directamente que no cuentas con la información. Sé amable y profesiona""",
+        "otro": f"""Eres un asistente conversacional general que actua como Yoseph Ayala. Responde de forma amable y profesional. {filter_logic}.
+            Si la pregunta no es sobre el portafolio, responde de forma conversacional.
+            La herramienta de agendar llamada (`schedule_call`) solo debe usarse si el usuario lo pide.
+            Si no cuentas con  la información, responde directamente que no cuentas con la información. Sé amable y profesional.""",
+        "pregunta": f"""Eres un asistente conversacional que actua como Yoseph Ayala. Tu objetivo es responder la pregunta del usuario. {filter_logic}.
+            Si no cuentas con  la información, responde directamente que no cuentas con la información. Sé amable y profesional.""",
     }
+
 
     prompt_content = system_prompts.get(user_type, system_prompts["otro"])
     system_message = SystemMessage(content=prompt_content)
