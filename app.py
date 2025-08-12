@@ -24,7 +24,7 @@ import locale
 
 import smtplib
 from email.message import EmailMessage
-
+import streamlit as st
 
 
 # Force Python to use UTF-8 for I/O streams
@@ -135,10 +135,6 @@ def schedule_call(nombre: str, email: str, asunto: str) -> str:
         f"El enlace es: {CALENDLY_URL}"
     )
 
-    # Nota: También podrías pasar el nombre, email y asunto como parámetros URL para que Calendly los precargue.
-    # Por ejemplo: f"{CALENDLY_URL}?name={nombre}&email={email}&a1={asunto}"
-    # Sin embargo, el LLM debería poder manejar esta lógica por sí mismo en la mayoría de los casos.
-
     return message
 
 # --- Definición de conjuntos de herramientas por rol ---
@@ -245,7 +241,6 @@ def agent_node(state: GraphState):
             Si no cuentas con  la información, responde directamente que no cuentas con la información. Sé amable y profesional.""",
     }
 
-
     prompt_content = system_prompts.get(user_type, system_prompts["otro"])
     system_message = SystemMessage(content=prompt_content)
 
@@ -277,8 +272,27 @@ def clarification_node(state: GraphState):
 
 # --- 5. Lógica de Enrutamiento (Router) ---
 def router(state: GraphState) -> Literal["agent", "clarification"]:
+    # Obtener la clasificación actual y la anterior (si existe)
     user_type = state["user_type"]
-    return "clarification" if user_type == "pregunta" else "agent"
+    last_user_type = state.get("last_user_type")
+
+    # Si ya se ha establecido un rol y el clasificador no lo cambió a "pregunta",
+    # entonces continuamos con el agente sin volver a preguntar.
+    if last_user_type and user_type == "pregunta" and last_user_type != "pregunta":
+        # Se asume que la nueva pregunta es parte del mismo rol, a menos que se indique lo contrario.
+        # Volvemos a asignar el user_type anterior para no perder el contexto.
+        state["user_type"] = last_user_type
+        print(f"[Router] Manteniendo rol '{last_user_type}'.")
+        return "agent"
+
+    # Si el usuario es 'pregunta' y es la primera vez que se interactúa, se va a aclaración.
+    if user_type == "pregunta" and not last_user_type:
+        print("[Router] No se ha definido un rol. Yendo a aclaración.")
+        return "clarification"
+
+    # Si la clasificación es una de las opciones válidas, va al agente.
+    print(f"[Router] Clasificación exitosa: '{user_type}'. Yendo a agente.")
+    return "agent"
 
 
 # --- 6. Construcción del Grafo ---
@@ -308,7 +322,14 @@ builder.add_edge("clarification", END)
 
 
 # --- 7. Compilación y Configuración de la Memoria ---
-memory = MemorySaver()
+
+# Almacena MemorySaver en st.session_state para que persista a través de recargas.
+if "memory_saver" not in st.session_state:
+    st.session_state["memory_saver"] = MemorySaver()
+
+# Usa la instancia de MemorySaver almacenada en session_state
+memory = st.session_state["memory_saver"]
+
 graph = builder.compile(checkpointer=memory)
 
 
@@ -346,35 +367,50 @@ def ensure_chroma_db_is_ready():
         return False
 
 
-# --- 9. Interfaz de Línea de Comandos (CLI) ---
+# ---------- 9. Interfaz Streamlit ----------
+st.set_page_config(page_title="Portafolio Inteligente", page_icon="🤖")
+st.title("🤖 Multiagente de IA")
+
 def main():
-    print("Portafolio Multiagente con LangGraph (CLI)")
-    print("Comandos: /exit")
 
-    if not ensure_chroma_db_is_ready():
-        print("[Error fatal] No se pudo inicializar la base de datos de conocimientos. El agente no podrá responder preguntas sobre el CV.")
-        return
+    if "history" not in st.session_state:
+        st.session_state["history"] = []
 
-    thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
+    for mensaje in st.session_state["history"]:
+        with st.chat_message(mensaje["role"]):
+            st.markdown(mensaje["content"])
 
-    while True:
-        try:
-            user_input = input('> ')
-        except (EOFError, KeyboardInterrupt):
-            print("\n[Agente]: Adiós.")
-            break
+    user_input = st.chat_input("Escribe algo...")
 
-        if not user_input:
-            continue
-        if user_input.lower() in ["/exit", "/quit"]:
-            print("[Agente]: ¡Hasta luego!")
-            break
+    if user_input:
+        st.session_state["history"].append({"role": "user", "content": user_input})
 
-        for step in graph.stream({"messages": [HumanMessage(content=user_input)]}, config, stream_mode="values"):
-            msg = step["messages"][-1]
-            print(msg.content, end='', flush=True)
-        print()
+        with st.chat_message("user"):
+            st.markdown(user_input)
+
+        with st.chat_message("assistant"):
+            output = ""
+            try:
+                config = {"configurable": {"thread_id": "test_id"}}
+
+                all_messages = []
+
+                for paso in graph.stream({"messages": [HumanMessage(content=user_input)]}, config, stream_mode="values"):
+                    all_messages.extend(paso["messages"])
+
+                if all_messages:
+                    # El último mensaje de 'all_messages' contendrá la respuesta final del asistente.
+                    final_assistant_message = all_messages[-1].content
+                    st.markdown(final_assistant_message)
+                    output = final_assistant_message
+                else:
+                    st.markdown("No se generó ninguna respuesta.")
+
+            except Exception as e:
+                st.error(f"Error: {e}")
+                output = f"Error: {e}"
+
+        st.session_state["history"].append({"role": "assistant", "content": output})
 
 if __name__ == "__main__":
     main()
