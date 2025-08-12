@@ -1,10 +1,11 @@
-import os
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_community.document_loaders import GithubFileLoader
+from langchain_community.document_loaders import PyPDFLoader
 from dotenv import load_dotenv
+import os
 
 load_dotenv()
 
@@ -58,7 +59,6 @@ def add_single_document_to_chroma(document: Document):
         embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
         # 4. Conectar a la base de datos Chroma existente
-        # No uses 'Chroma.from_documents' si quieres añadir, usa 'Chroma()' y 'add_documents'
         vectordb = Chroma(
             persist_directory=CHROMA_PERSIST_DIR,
             embedding_function=embeddings,
@@ -75,4 +75,31 @@ def add_single_document_to_chroma(document: Document):
 # Ejecutar la función con el documento que deseas añadir
 if __name__ == "__main__":
 
-    add_single_document_to_chroma(single_document)
+    #Añadir el documento único a la base de datos Chroma
+    #add_single_document_to_chroma(single_document)
+
+
+    #Añado el código para cargar un PDF y añadirlo a Chroma
+    pdf_path = "./data_sources/Portafolio Extendido.pdf"
+
+    # 1. Cargar el PDF
+    loader = PyPDFLoader(pdf_path)
+    documents = loader.load()
+
+    # 2. Dividir el contenido en fragmentos (chunks)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = text_splitter.split_documents(documents)
+
+    # 3. Crear los embeddings y cargar los chunks en Chroma
+    # Asegúrate de que la variable de entorno OPENAI_API_KEY esté configurada
+    embeddings_model = OpenAIEmbeddings(model="text-embedding-3-small")
+
+    # Si es la primera vez, se creará la base de datos en el directorio especificado
+    vector_store = Chroma.from_documents(
+        documents=chunks,
+        persist_directory=CHROMA_PERSIST_DIR,
+        embedding=embeddings_model,
+        collection_name=CHROMA_COLLECTION_NAME
+    )
+    # Opcional: Para verificar que todo se cargó correctamente
+    print(f"Se han cargado {len(chunks)} fragmentos en la base de datos Chroma.")
