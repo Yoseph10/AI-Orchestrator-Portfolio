@@ -333,40 +333,6 @@ memory = st.session_state["memory_saver"]
 graph = builder.compile(checkpointer=memory)
 
 
-# --- 8. Funciones Auxiliares para el CLI ---
-def ingest_pdf_to_chroma(pdf_path: str):
-    if not os.path.exists(pdf_path):
-        return f"[Error] El archivo no existe: {pdf_path}"
-    try:
-        print(f"[Ingest] Cargando {pdf_path}...")
-        loader = PyPDFLoader(pdf_path)
-        docs = loader.load()
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-        chunks = splitter.split_documents(docs)
-        print(f"[Ingest] {len(chunks)} fragmentos generados. Creando embeddings...")
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-        vectordb = Chroma.from_documents(chunks, embeddings, persist_directory=CHROMA_PERSIST_DIR, collection_name=CHROMA_COLLECTION_NAME)
-        return f"[Ingest] Éxito: {len(chunks)} fragmentos indexados en la colección '{CHROMA_COLLECTION_NAME}'."
-    except Exception as e:
-        return f"[Ingest] Error: {e}"
-
-def ensure_chroma_db_is_ready():
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-    try:
-        vectordb = Chroma(persist_directory=CHROMA_PERSIST_DIR, embedding_function=embeddings, collection_name=CHROMA_COLLECTION_NAME)
-        if vectordb._collection.count() > 0:
-            print(f"[RAG] Base de datos Chroma existente con {vectordb._collection.count()} documentos. No es necesaria la indexación.")
-            return True
-        else:
-            print("[RAG] Base de datos Chroma vacía o no existe. Iniciando indexación del CV.")
-            result = ingest_pdf_to_chroma(CV_PATH)
-            print(result)
-            return "Éxito" in result
-    except Exception as e:
-        print(f"[RAG] Error al verificar la base de datos: {e}")
-        return False
-
-
 # ---------- 9. Interfaz Streamlit ----------
 st.set_page_config(page_title="Portafolio Inteligente", page_icon="🤖")
 st.title("🤖 Multiagente de IA")
