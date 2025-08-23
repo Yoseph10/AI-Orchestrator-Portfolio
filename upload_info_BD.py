@@ -1,3 +1,6 @@
+#THIS FILE SHOWS HOW TO UPLOAD A SINGLE DOCUMENT TO AN EXISTING CHROMA DB
+#AND ALSO HOW TO UPLOAD A PDF TO THE SAME DBD
+
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
