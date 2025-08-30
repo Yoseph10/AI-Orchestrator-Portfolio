@@ -42,6 +42,8 @@ CALENDLY_URL = os.getenv("CALENDLY_URL")
 es_elast = os.getenv("ES_PASSWORD")
 es_url = os.getenv("ES_URL")
 
+import traceback
+
 
 # --- 2. Herramientas del Agente (Tools) ---
 @tool
@@ -56,12 +58,32 @@ def search_elastic(query: str, k: int = 4, filters: dict = None) -> str:
 
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
+    print("embeddings establecidos")
+
+    try:
+        vector_store = le(
+            es_url=es_url,
+            es_user="elastic",
+            es_password=es_elast,
+            index_name="ai_portafolio"
+        )
+        print("[DEBUG] Conexión creada con éxito")
+
+    except Exception as e:
+        print("[ERROR] Ocurrió un error:")
+        traceback.print_exc()
+        return {"error": str(e)}
+
+    '''
     vector_store = le(
             es_url=es_url,
             es_user="elastic",
             es_password=es_elast,
             index_name="ai_portafolio"
     )
+
+    print("vector_store creado")
+    '''
 
     storage_context_read = StorageContext.from_defaults(vector_store=vector_store)
 
@@ -87,24 +109,36 @@ def search_elastic(query: str, k: int = 4, filters: dict = None) -> str:
 
     if filters:
         for key, value in filters.items():
+            # Si viene en formato {"eq": "cv.pdf"}, extraer el valor
+            if isinstance(value, dict) and "eq" in value:
+                value = value["eq"]
+
             print(f"Applying filter - Key: {key}, Value: {value}")
+
             llama_filters = MetadataFilters(
                 filters=[
                     MetadataFilter(
-                        key=key, value=value, operator=FilterOperator.TEXT_MATCH
+                        key=key, value=value, operator=FilterOperator.EQ
                     )
                 ]
             )
 
+        #print(f"[Search Elastic] Filtros construidos: {llama_filters}")
         retriever = index_read.as_retriever(filters=llama_filters, similarity_top_k=k)
-
-        results = retriever.retrieve(query)
-
-        print(results)
 
     else:
         retriever = index_read.as_retriever(search_kwargs={"k": k})
+
+    #print(f"[Search Elastic] retriever: {retriever}")
+
+
+    try:
         results = retriever.retrieve(query)
+
+    except Exception as e:
+        print("[ERROR] Ocurrió un error:")
+        traceback.print_exc()
+        return {"error": str(e)}
 
     output = "\n\n".join([
         f"[{i+1}] {node.node.text.strip()}\nFuente: {node.node.metadata.get('source', 'N/A')}"
@@ -386,7 +420,7 @@ async def startup_event():
     # ⚠️ aquí ya puedes compilar el grafo con memoria persistente
 
     # IMPORTANT: You need to call .setup() the first time you're using your memory
-    await memory.setup()
+    #await memory.setup()
 
     global graph
     graph = builder.compile(checkpointer=memory)
@@ -399,7 +433,7 @@ async def shutdown_event():
 
 @app.post("/chat")
 async def chat_endpoint(user_input: str):
-    config = {"configurable": {"thread_id": "1"}} # Use a unique ID for each user in production
+    config = {"configurable": {"thread_id": "2"}} # Use a unique ID for each user in production
     all_messages = []
     async for paso in graph.astream(
         {"messages": [HumanMessage(content=user_input)]},
