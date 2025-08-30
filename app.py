@@ -1,83 +1,151 @@
+#APP USING ELASTICSERACH AND LLAMAINDEX
+from fastapi import FastAPI
 import os
-import json
-import time
-import uuid
 import re
-from typing import TypedDict, Annotated, Literal, List, Any, Dict
+from typing import TypedDict, Annotated, Literal
 
 from dotenv import load_dotenv
-from langchain_core.messages import AnyMessage, HumanMessage, AIMessage, ToolMessage, SystemMessage
+from langchain_core.messages import AnyMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import tool
-from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_community.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
-from langgraph.checkpoint.memory import MemorySaver
-
-
-import sys
-import locale
+from llama_index.vector_stores.elasticsearch import ElasticsearchStore as le
+from llama_index.core import VectorStoreIndex
+from llama_index.core.vector_stores import (
+    MetadataFilter,
+    MetadataFilters,
+    FilterOperator,
+)
+from llama_index.core import StorageContext
 
 import smtplib
 from email.message import EmailMessage
-import streamlit as st
 
 
-# Force Python to use UTF-8 for I/O streams
-if sys.stdout.encoding != 'utf-8':
-    sys.stdout = open(sys.stdout.fileno(), mode='w', encoding='utf-8', buffering=1)
-if sys.stderr.encoding != 'utf-8':
-    sys.stderr = open(sys.stderr.fileno(), mode='w', encoding='utf-8', buffering=1)
-if sys.stdin.encoding != 'utf-8':
-    sys.stdin = open(sys.stdin.fileno(), mode='r', encoding='utf-8', buffering=1)
 
-# Ensure the system's default locale is also set to UTF-8
-try:
-    locale.setlocale(locale.LC_ALL, 'en_US.utf8')
-except locale.Error:
-    try:
-        locale.setlocale(locale.LC_ALL, 'C.UTF-8')
-    except locale.Error:
-        pass
+from psycopg_pool import AsyncConnectionPool
+from psycopg.rows import dict_row
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 
 # --- 1. Configuración Inicial ---
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-CHROMA_PERSIST_DIR = "chroma_db"
-CHROMA_COLLECTION_NAME = "portfolio_lg"
 CV_PATH = "data_sources/cv.pdf"
 SENDER_EMAIL = os.getenv("SENDER_EMAIL")
 SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
 CALENDLY_URL = os.getenv("CALENDLY_URL")
+#Elastic credentials
+es_elast = os.getenv("ES_PASSWORD")
+es_url = os.getenv("ES_URL")
+
+import traceback
+
 
 # --- 2. Herramientas del Agente (Tools) ---
 @tool
-def search_chroma(query: str, k: int = 4, filters: dict = None) -> List[Dict[str, Any]]:
+def search_elastic(query: str, k: int = 4, filters: dict = None) -> str:
     """
     Busca información relevante en el CV y otros documentos del portafolio,
-    opcionalmente filtrando por metadatos como el 'source'.
+    opcionalmente filtrando por metadatos como el 'file_name'.
     Úsalo para responder preguntas sobre experiencia, proyectos, habilidades, y formación.
     """
+
+    print(f"[Search Elastic] Iniciando búsqueda con query: '{query}', k: {k}, filters: {filters}")
+
+    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+    print("embeddings establecidos")
+
     try:
-        embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
-        vectordb = Chroma(persist_directory=CHROMA_PERSIST_DIR, embedding_function=embeddings, collection_name=CHROMA_COLLECTION_NAME)
-        if vectordb._collection.count() == 0:
-            return [{"error": "La base de datos Chroma está vacía."}]
+        vector_store = le(
+            es_url=es_url,
+            es_user="elastic",
+            es_password=es_elast,
+            index_name="ai_portafolio"
+        )
+        print("[DEBUG] Conexión creada con éxito")
 
-        # Realiza la búsqueda, aplicando el filtro si está presente
-        if filters:
-            docs = vectordb.similarity_search(query, k=k, filter=filters)
-        else:
-            docs = vectordb.similarity_search(query, k=k)
-
-        return [{"source": d.metadata.get("source", "N/A"), "text": d.page_content} for d in docs]
     except Exception as e:
-        return [{"error": f"Error buscando en Chroma: {str(e)}"}]
+        print("[ERROR] Ocurrió un error:")
+        traceback.print_exc()
+        return {"error": str(e)}
+
+    '''
+    vector_store = le(
+            es_url=es_url,
+            es_user="elastic",
+            es_password=es_elast,
+            index_name="ai_portafolio"
+    )
+
+    print("vector_store creado")
+    '''
+
+    storage_context_read = StorageContext.from_defaults(vector_store=vector_store)
+
+    print("[Search Elastic] Conexión a Elasticsearch establecida.")
+
+    try:
+        index_read = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store,
+            storage_context=storage_context_read, # Este es el parámetro incorrecto
+            embed_model=embeddings
+        )
+        print("¡El índice se cargó exitosamente!")
+
+    except TypeError as e:
+        print(f"ERROR: {e}")
+        # El error te dirá algo como: "TypeError: VectorStoreIndex.from_vector_store() got an unexpected keyword argument 'storage_context'"
+        # Esto te indica claramente que 'storage_context' no es un parámetro válido para esta función.
+    except Exception as e:
+        print(f"Ocurrió un error inesperado: {e}")
+
+    print("[Search Elastic] VectorStoreIndex cargado correctamente.")
+
+
+    if filters:
+        for key, value in filters.items():
+            # Si viene en formato {"eq": "cv.pdf"}, extraer el valor
+            if isinstance(value, dict) and "eq" in value:
+                value = value["eq"]
+
+            print(f"Applying filter - Key: {key}, Value: {value}")
+
+            llama_filters = MetadataFilters(
+                filters=[
+                    MetadataFilter(
+                        key=key, value=value, operator=FilterOperator.EQ
+                    )
+                ]
+            )
+
+        #print(f"[Search Elastic] Filtros construidos: {llama_filters}")
+        retriever = index_read.as_retriever(filters=llama_filters, similarity_top_k=k)
+
+    else:
+        retriever = index_read.as_retriever(search_kwargs={"k": k})
+
+    #print(f"[Search Elastic] retriever: {retriever}")
+
+
+    try:
+        results = retriever.retrieve(query)
+
+    except Exception as e:
+        print("[ERROR] Ocurrió un error:")
+        traceback.print_exc()
+        return {"error": str(e)}
+
+    output = "\n\n".join([
+        f"[{i+1}] {node.node.text.strip()}\nFuente: {node.node.metadata.get('source', 'N/A')}"
+        for i, node in enumerate(results)
+    ])
+
+    return output if output else "No se encontraron resultados relevantes."
+
 
 @tool
 def send_cv(email_to: str) -> str:
@@ -138,10 +206,10 @@ def schedule_call(nombre: str, email: str, asunto: str) -> str:
     return message
 
 # --- Definición de conjuntos de herramientas por rol ---
-tools_reclutador = [search_chroma, send_cv]
-tools_cliente = [search_chroma, schedule_call]
-tools_alumno = [search_chroma]
-tools_otro = [search_chroma, schedule_call]
+tools_reclutador = [search_elastic, send_cv]
+tools_cliente = [search_elastic, schedule_call]
+tools_alumno = [search_elastic]
+tools_otro = [search_elastic, schedule_call]
 
 TOOLS_BY_ROLE = {
     "reclutador": tools_reclutador,
@@ -207,19 +275,18 @@ def agent_node(state: GraphState):
     filter_logic = ""
     if user_type == "reclutador":
         filter_logic = (
-            "Utiliza la herramienta de búsqueda (`search_chroma`)"
-            "con los filtros `{'source': 'data_sources/cv.pdf'}` o `{'source': 'Yoseph10/AgentAI_JobSearch'}` "
-            "para buscar información relevante sobre mi CV o proyectos. Si la información es sobre el proyecto del portafolio `AgentAI_JobSearch`, usa el segundo filtro. Si es sobre mi experiencia laboral o habilidades, usa el primer filtro."
+            "Para responder preguntas sobre la experiencia laboral y el curriculum del candidato, utiliza la herramienta `search_elastic`\
+            .Asegúrate de incluir el filtro `filters={'file_name': 'cv.pdf'}` en la llamada a la herramienta para buscar solo en el CV."
         )
     elif user_type in ["cliente", "alumno"]:
         filter_logic = (
-            "Utiliza la herramienta de búsqueda (`search_chroma`)"
-            "con el filtro `{'source': './data_sources/Portafolio Extendido.pdf'}`"
+            "Para responder preguntas sobre proyectos o formación académica, usa la herramienta `search_elastic`. "
+            "Siempre incluye el filtro `filters={'file_name': 'Portafolio Extendido.pdf'}` en la llamada a la herramienta para obtener resultados detallados."
         )
     else:
         # No se aplica ningún filtro para 'otro' o 'pregunta'
         filter_logic = (
-            "Para este tipo de usuario, utiliza la herramienta `search_chroma` sin ningún filtro para buscar en todos los documentos disponibles."
+            "Para este tipo de usuario, utiliza la herramienta `search_elastic` sin ningún filtro para buscar en todos los documentos disponibles."
         )
 
     system_prompts = {
@@ -321,62 +388,58 @@ builder.add_edge("tools", "agent")
 builder.add_edge("clarification", END)
 
 
+app = FastAPI()
+
+
 # --- 7. Compilación y Configuración de la Memoria ---
-
-# Almacena MemorySaver en st.session_state para que persista a través de recargas.
-if "memory_saver" not in st.session_state:
-    st.session_state["memory_saver"] = MemorySaver()
-
-# Usa la instancia de MemorySaver almacenada en session_state
-memory = st.session_state["memory_saver"]
-
-graph = builder.compile(checkpointer=memory)
+#memory = MemorySaver()
+#graph = builder.compile(checkpointer=memory)
 
 
-# ---------- 9. Interfaz Streamlit ----------
-st.set_page_config(page_title="Portafolio Inteligente", page_icon="🤖")
-st.title("🤖 Multiagente de IA")
+memory: AsyncPostgresSaver | None = None
+graph = None
 
-def main():
 
-    if "history" not in st.session_state:
-        st.session_state["history"] = []
+@app.on_event("startup")
+async def startup_event():
+    global memory
+    pool = AsyncConnectionPool(
+        conninfo=f"postgres://{os.getenv('PSQL_USERNAME')}:{os.getenv('PSQL_PASSWORD')}"
+        f"@{os.getenv('PSQL_HOST')}:{os.getenv('PSQL_PORT')}/{os.getenv('PSQL_DATABASE')}"
+        f"?sslmode={os.getenv('PSQL_SSLMODE')}",
+        max_size=20,
+        kwargs={
+            "autocommit": True,
+            "prepare_threshold": 0,
+            "row_factory": dict_row,
+        },
+    )
+    conn = await pool.getconn()   # obtenemos una conexión
+    memory = AsyncPostgresSaver(conn)
+    # ⚠️ aquí ya puedes compilar el grafo con memoria persistente
 
-    for mensaje in st.session_state["history"]:
-        with st.chat_message(mensaje["role"]):
-            st.markdown(mensaje["content"])
+    # IMPORTANT: You need to call .setup() the first time you're using your memory
+    #await memory.setup()
 
-    user_input = st.chat_input("Escribe algo...")
+    global graph
+    graph = builder.compile(checkpointer=memory)
 
-    if user_input:
-        st.session_state["history"].append({"role": "user", "content": user_input})
 
-        with st.chat_message("user"):
-            st.markdown(user_input)
+@app.on_event("shutdown")
+async def shutdown_event():
+    print("Apagando servidor... listo.")
 
-        with st.chat_message("assistant"):
-            output = ""
-            try:
-                config = {"configurable": {"thread_id": "test_id"}}
 
-                all_messages = []
+@app.post("/chat")
+async def chat_endpoint(user_input: str):
+    config = {"configurable": {"thread_id": "2"}} # Use a unique ID for each user in production
+    all_messages = []
+    async for paso in graph.astream(
+        {"messages": [HumanMessage(content=user_input)]},
+        config,
+        stream_mode="values"
+    ):
+        all_messages.extend(paso["messages"])
 
-                for paso in graph.stream({"messages": [HumanMessage(content=user_input)]}, config, stream_mode="values"):
-                    all_messages.extend(paso["messages"])
-
-                if all_messages:
-                    # El último mensaje de 'all_messages' contendrá la respuesta final del asistente.
-                    final_assistant_message = all_messages[-1].content
-                    st.markdown(final_assistant_message)
-                    output = final_assistant_message
-                else:
-                    st.markdown("No se generó ninguna respuesta.")
-
-            except Exception as e:
-                st.error(f"Error: {e}")
-                output = f"Error: {e}"
-
-        st.session_state["history"].append({"role": "assistant", "content": output})
-
-if __name__ == "__main__":
-    main()
+    final_assistant_message = all_messages[-1].content if all_messages else "No se generó respuesta."
+    return {"response": final_assistant_message}
