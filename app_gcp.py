@@ -25,6 +25,12 @@ import smtplib
 from email.message import EmailMessage
 
 
+
+from psycopg_pool import AsyncConnectionPool
+from psycopg.rows import dict_row
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+
 # --- 1. Configuración Inicial ---
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -353,15 +359,53 @@ app = FastAPI()
 
 
 # --- 7. Compilación y Configuración de la Memoria ---
-memory = MemorySaver()
-graph = builder.compile(checkpointer=memory)
+#memory = MemorySaver()
+#graph = builder.compile(checkpointer=memory)
+
+
+memory: AsyncPostgresSaver | None = None
+graph = None
+
+
+@app.on_event("startup")
+async def startup_event():
+    global memory
+    pool = AsyncConnectionPool(
+        conninfo=f"postgres://{os.getenv('PSQL_USERNAME')}:{os.getenv('PSQL_PASSWORD')}"
+        f"@{os.getenv('PSQL_HOST')}:{os.getenv('PSQL_PORT')}/{os.getenv('PSQL_DATABASE')}"
+        f"?sslmode={os.getenv('PSQL_SSLMODE')}",
+        max_size=20,
+        kwargs={
+            "autocommit": True,
+            "prepare_threshold": 0,
+            "row_factory": dict_row,
+        },
+    )
+    conn = await pool.getconn()   # obtenemos una conexión
+    memory = AsyncPostgresSaver(conn)
+    # ⚠️ aquí ya puedes compilar el grafo con memoria persistente
+
+    # IMPORTANT: You need to call .setup() the first time you're using your memory
+    await memory.setup()
+
+    global graph
+    graph = builder.compile(checkpointer=memory)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    print("Apagando servidor... listo.")
 
 
 @app.post("/chat")
 async def chat_endpoint(user_input: str):
-    config = {"configurable": {"thread_id": "test_id"}} # Use a unique ID for each user in production
+    config = {"configurable": {"thread_id": "1"}} # Use a unique ID for each user in production
     all_messages = []
-    for paso in graph.stream({"messages": [HumanMessage(content=user_input)]}, config, stream_mode="values"):
+    async for paso in graph.astream(
+        {"messages": [HumanMessage(content=user_input)]},
+        config,
+        stream_mode="values"
+    ):
         all_messages.extend(paso["messages"])
 
     final_assistant_message = all_messages[-1].content if all_messages else "No se generó respuesta."
