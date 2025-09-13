@@ -7,18 +7,18 @@ from typing import TypedDict, Annotated, Literal
 from dotenv import load_dotenv
 from langchain_core.messages import AnyMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
+from llama_index.embeddings.openai import OpenAIEmbedding
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 from llama_index.vector_stores.elasticsearch import ElasticsearchStore as le
-from llama_index.core import VectorStoreIndex
+from llama_index.core import VectorStoreIndex, StorageContext
 from llama_index.core.vector_stores import (
     MetadataFilter,
     MetadataFilters,
     FilterOperator,
 )
-from llama_index.core import StorageContext
 
 import smtplib
 from email.message import EmailMessage
@@ -38,8 +38,9 @@ SENDER_EMAIL = os.getenv("SENDER_EMAIL")
 SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
 CALENDLY_URL = os.getenv("CALENDLY_URL")
 #Elastic credentials
-es_elast = os.getenv("ES_PASSWORD")
+es_password = os.getenv("ES_PASSWORD")
 es_url = os.getenv("ES_URL")
+es_user = os.getenv("ES_USER")
 
 import traceback
 
@@ -55,34 +56,27 @@ def search_elastic(query: str, k: int = 4, filters: dict = None) -> str:
 
     print(f"[Search Elastic] Iniciando búsqueda con query: '{query}', k: {k}, filters: {filters}")
 
-    embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+    embed_model = OpenAIEmbedding(model="text-embedding-3-small")
 
     print("embeddings establecidos")
 
     try:
         vector_store = le(
+            index_name="ai_portafolio",
             es_url=es_url,
-            es_user="elastic",
-            es_password=es_elast,
-            index_name="ai_portafolio"
-        )
+            es_user=es_user,
+            es_password=es_password
+            )
         print("[DEBUG] Conexión creada con éxito")
+
+        # Verificar la conexión antes de continuar
+        #client = vector_store.client
+        #client.info()  # Esto forzará la autenticación
 
     except Exception as e:
         print("[ERROR] Ocurrió un error:")
         traceback.print_exc()
         return {"error": str(e)}
-
-    '''
-    vector_store = le(
-            es_url=es_url,
-            es_user="elastic",
-            es_password=es_elast,
-            index_name="ai_portafolio"
-    )
-
-    print("vector_store creado")
-    '''
 
     storage_context_read = StorageContext.from_defaults(vector_store=vector_store)
 
@@ -92,7 +86,7 @@ def search_elastic(query: str, k: int = 4, filters: dict = None) -> str:
         index_read = VectorStoreIndex.from_vector_store(
             vector_store=vector_store,
             storage_context=storage_context_read, # Este es el parámetro incorrecto
-            embed_model=embeddings
+            embed_model=embed_model
         )
         print("¡El índice se cargó exitosamente!")
 
@@ -126,7 +120,7 @@ def search_elastic(query: str, k: int = 4, filters: dict = None) -> str:
         retriever = index_read.as_retriever(filters=llama_filters, similarity_top_k=k)
 
     else:
-        retriever = index_read.as_retriever(search_kwargs={"k": k})
+        retriever = index_read.as_retriever(similarity_top_k=k)
 
     #print(f"[Search Elastic] retriever: {retriever}")
 
@@ -432,7 +426,7 @@ async def shutdown_event():
 
 @app.post("/chat")
 async def chat_endpoint(user_input: str):
-    config = {"configurable": {"thread_id": "2"}} # Use a unique ID for each user in production
+    config = {"configurable": {"thread_id": "1"}} # Use a unique ID for each user in production
     all_messages = []
     async for paso in graph.astream(
         {"messages": [HumanMessage(content=user_input)]},
