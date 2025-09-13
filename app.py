@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 import os
 import re
-from typing import TypedDict, Annotated, Literal
+from typing import TypedDict, Annotated, Literal, Optional
 
 from dotenv import load_dotenv
 from langchain_core.messages import AnyMessage, HumanMessage, AIMessage, SystemMessage
@@ -23,6 +23,7 @@ from llama_index.core.vector_stores import (
 import smtplib
 from email.message import EmailMessage
 
+import uuid
 
 
 from psycopg_pool import AsyncConnectionPool
@@ -392,7 +393,8 @@ app = FastAPI()
 
 memory: AsyncPostgresSaver | None = None
 graph = None
-
+# Guardamos el thread_id global de usuarios anónimos
+anon_thread_id: str | None = None
 
 @app.on_event("startup")
 async def startup_event():
@@ -419,15 +421,21 @@ async def startup_event():
     graph = builder.compile(checkpointer=memory)
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    print("Apagando servidor... listo.")
-
-
 @app.post("/chat")
-async def chat_endpoint(user_input: str):
-    config = {"configurable": {"thread_id": "1"}} # Use a unique ID for each user in production
+async def chat_endpoint(user_input: str, usuario: Optional[str] = None):
+    global anon_thread_id
+
+    if usuario:
+        usuario_parsed = usuario.strip().lower()
+        thread_id = usuario_parsed
+    else:
+        if not anon_thread_id:
+            anon_thread_id = str(uuid.uuid4())  # Solo la primera vez
+        thread_id = anon_thread_id
+
+    config = {"configurable": {"thread_id": thread_id}}
     all_messages = []
+
     async for paso in graph.astream(
         {"messages": [HumanMessage(content=user_input)]},
         config,
@@ -435,5 +443,13 @@ async def chat_endpoint(user_input: str):
     ):
         all_messages.extend(paso["messages"])
 
-    final_assistant_message = all_messages[-1].content if all_messages else "No se generó respuesta."
-    return {"response": final_assistant_message}
+    final_assistant_message = (
+        all_messages[-1].content if all_messages else "No se generó respuesta."
+    )
+    return {"response": final_assistant_message, "thread_id": thread_id}
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    global anon_thread_id
+    anon_thread_id = None  # Se limpia al cerrar servidor
+    print("Apagando servidor... listo.")
