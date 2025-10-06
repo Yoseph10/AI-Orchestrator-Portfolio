@@ -19,14 +19,17 @@ es_elast = os.getenv("ES_PASSWORD")
 es_url = os.getenv("ES_URL")
 
 # Paso 1: Cargar documentos locales
-documents = SimpleDirectoryReader("./data_sources").load_data()
+documents = SimpleDirectoryReader("./data_sources2").load_data()
 
 # Paso 2: Definir pipeline de ingesta
+
+embedding_model = OpenAIEmbedding(model="text-embedding-3-small")
+
 pipeline = IngestionPipeline(
     transformations=[
         SentenceSplitter(chunk_size=1500, chunk_overlap=50),
         TitleExtractor(),
-        OpenAIEmbedding(),
+        embedding_model,
     ]
 )
 
